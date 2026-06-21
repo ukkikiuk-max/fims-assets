@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="FIMS Scanner">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>F I M S QR Scanner</title>
+  <style>
+    :root {
+      --main: #3B5BC4;
+      --bg: #0B1020;
+      --text: #F9FAFB;
+      --muted: #A7B0C0;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100dvh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      display: flex;
+      align-items: stretch;
+      justify-content: center;
+    }
+
+    .page {
+      width: 100%;
+      max-width: 560px;
+      min-height: 100dvh;
+      padding: calc(16px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom));
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .title {
+      font-size: 20px;
+      font-weight: 900;
+      letter-spacing: 0.18em;
+      text-align: center;
+      margin-top: 0;
+      line-height: 1.1;
+    }
+
+    .sub {
+      font-size: 12px;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.3;
+    }
+
+    .cameraBox {
+      width: 100%;
+      background: #000;
+      border: 1px solid rgba(255,255,255,0.16);
+      border-radius: 22px;
+      overflow: hidden;
+      position: relative;
+      min-height: 0;
+      flex: 1 1 auto;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 18px 50px rgba(0,0,0,0.34);
+    }
+
+    video {
+      width: 100%;
+      height: auto;
+      min-height: 0;
+      height: 100%;
+      display: block;
+      background: #000;
+      object-fit: cover;
+    }
+
+    .guideBox {
+      position: absolute;
+      width: 68%;
+      aspect-ratio: 1 / 1;
+      border: 3px solid rgba(255,255,255,0.82);
+      border-radius: 18px;
+      box-shadow: 0 0 0 999px rgba(0,0,0,0.22);
+      pointer-events: none;
+    }
+
+    .status {
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 16px;
+      padding: 10px 12px;
+      font-size: 13px;
+      line-height: 1.35;
+      white-space: pre-line;
+    }
+
+    .status.err {
+      border-color: rgba(239,68,68,0.55);
+      color: #FECACA;
+    }
+
+    .btnRow {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    button {
+      border: 0;
+      border-radius: 14px;
+      padding: 12px 10px;
+      font-weight: 800;
+      font-size: 14px;
+      color: #fff;
+      background: var(--main);
+      cursor: pointer;
+    }
+
+    button.secondary {
+      background: #374151;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 84px;
+      border-radius: 14px;
+      border: 1px solid rgba(255,255,255,0.18);
+      background: rgba(255,255,255,0.08);
+      color: var(--text);
+      padding: 12px;
+      font-size: 13px;
+      display: none;
+    }
+
+    canvas {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="title">F I M S</div>
+    <div class="sub">QR 코드를 카메라에 비추면 자동으로 인식합니다.<br>인식 즉시 카메라는 자동으로 꺼집니다.</div>
+
+    <div class="cameraBox">
+      <video id="video" autoplay muted playsinline webkit-playsinline></video>
+      <div class="guideBox"></div>
+    </div>
+
+    <div id="status" class="status">카메라를 여는 중입니다...</div>
+    <textarea id="resultText" readonly></textarea>
+
+    <div class="btnRow">
+      <button id="btnStart" type="button">다시 스캔</button>
+      <button id="btnClose" type="button" class="secondary">닫기</button>
+    </div>
+
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+  <script>
+    (function() {
+      'use strict';
+
+      var video = document.getElementById('video');
+      var canvas = document.getElementById('canvas');
+      var statusBox = document.getElementById('status');
+      var resultText = document.getElementById('resultText');
+      var btnStart = document.getElementById('btnStart');
+      var btnClose = document.getElementById('btnClose');
+
+      var stream = null;
+      var rafId = 0;
+      var detected = false;
+
+      function getParam(name) {
+        return new URLSearchParams(window.location.search).get(name) || '';
+      }
+
+      var messageToken = getParam('token');
+      var returnOrigin = getParam('returnOrigin') || '*';
+
+      function setStatus(text, isError) {
+        statusBox.textContent = text || '';
+        statusBox.classList.toggle('err', !!isError);
+      }
+
+      function stopCamera() {
+        if (rafId) {
+          cancelAnimationFrame(rafId);
+          rafId = 0;
+        }
+
+        if (stream) {
+          try {
+            stream.getTracks().forEach(function(track) {
+              try { track.stop(); } catch (e) {}
+            });
+          } catch (e) {}
+        }
+
+        try { video.pause(); } catch (e) {}
+        try { video.srcObject = null; } catch (e) {}
+
+        stream = null;
+      }
+
+      function sendResult(qrText) {
+        var payload = {
+          type: 'YEK_FIMS_QR_SCANNED',
+          qrText: String(qrText || ''),
+          token: messageToken,
+          source: 'github-scanner'
+        };
+
+        var sent = false;
+
+        try {
+          if (window.opener && !window.opener.closed) {
+            window.opener.postMessage(payload, returnOrigin || '*');
+            sent = true;
+          }
+        } catch (e) {}
+
+        resultText.style.display = 'block';
+        resultText.value = payload.qrText;
+
+        if (sent) {
+          setStatus('QR 인식 완료.\n기존 F I M S 화면으로 결과를 전달했습니다.');
+          setTimeout(function() {
+            try { window.close(); } catch (e) {}
+          }, 700);
+        } else {
+          setStatus('QR 인식 완료.\n원래 화면 연결을 찾지 못했습니다. 아래 QR 값을 복사해서 사용하세요.', true);
+        }
+      }
+
+      function scanLoop() {
+        if (detected || !stream) return;
+
+        if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
+          rafId = requestAnimationFrame(scanLoop);
+          return;
+        }
+
+        var width = video.videoWidth;
+        var height = video.videoHeight;
+        var ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+        if (canvas.width !== width) canvas.width = width;
+        if (canvas.height !== height) canvas.height = height;
+
+        try {
+          ctx.drawImage(video, 0, 0, width, height);
+          var imageData = ctx.getImageData(0, 0, width, height);
+          var code = jsQR(imageData.data, width, height, {
+            inversionAttempts: 'dontInvert'
+          });
+
+          if (code && code.data) {
+            detected = true;
+            var qrText = code.data;
+
+            stopCamera();
+            sendResult(qrText);
+            return;
+          }
+        } catch (e) {}
+
+        rafId = requestAnimationFrame(scanLoop);
+      }
+
+      function startCamera() {
+        detected = false;
+        resultText.style.display = 'none';
+        resultText.value = '';
+
+        stopCamera();
+
+        video.autoplay = true;
+        video.muted = true;
+        video.playsInline = true;
+        video.setAttribute('autoplay', '');
+        video.setAttribute('muted', '');
+        video.setAttribute('playsinline', '');
+        video.setAttribute('webkit-playsinline', '');
+
+        setStatus('카메라 권한을 허용해 주세요.');
+
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          setStatus('이 브라우저에서는 실시간 카메라를 사용할 수 없습니다.', true);
+          return;
+        }
+
+        navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          },
+          audio: false
+        }).then(function(mediaStream) {
+          stream = mediaStream;
+          video.srcObject = stream;
+
+          return video.play()
+            .catch(function() {
+              video.muted = true;
+              video.setAttribute('muted', '');
+              return video.play();
+            });
+        }).then(function() {
+          setStatus('QR 코드를 화면 중앙에 맞춰 비춰주세요.');
+          scanLoop();
+        }).catch(function(err) {
+          stopCamera();
+          setStatus('카메라를 열 수 없습니다.\n브라우저 카메라 권한 또는 HTTPS 접속 상태를 확인해 주세요.\n\n' + (err && err.message ? err.message : err), true);
+        });
+      }
+
+      btnStart.addEventListener('click', startCamera);
+      btnClose.addEventListener('click', function() {
+        stopCamera();
+        try { window.close(); } catch (e) {}
+      });
+
+      window.addEventListener('pagehide', stopCamera);
+      window.addEventListener('beforeunload', stopCamera);
+
+      startCamera();
+    })();
+  </script>
+</body>
+</html>
